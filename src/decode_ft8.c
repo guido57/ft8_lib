@@ -365,10 +365,117 @@ static double elapsed_ms(const struct timespec *t0, const struct timespec *t1)
 }
 
 // ------------------------------------------------------------------------------------
-// Process a buffer already loaded from a file
+// Step 1: Waterfall Accumulation
+// ------------------------------------------------------------------------------------
+void accumulate_waterfall(monitor_t* mon, const float* signal, int num_samples) {
+    for (int frame_pos = 0; frame_pos + mon->block_size <= num_samples; frame_pos += mon->block_size) {
+        monitor_process(mon, signal + frame_pos);
+    }
+}
+
+// ------------------------------------------------------------------------------------
+// Step 2: Candidate Search
+// ------------------------------------------------------------------------------------
+int find_candidates(const waterfall_t* wf, candidate_t* candidate_list, int candidate_size, int min_score) {
+    return ft8_find_sync(wf, candidate_size, candidate_list, min_score);
+}
+
+// ------------------------------------------------------------------------------------
+// Step 3: Message Decoding
+// ------------------------------------------------------------------------------------
+int decode_candidates(const waterfall_t* wf, const candidate_t* candidate_list, int num_candidates,
+                      message_t* decoded, int max_decoded, int ldpc_iterations, float noise_power,
+                      struct tm const* tmp, double sec, float base_freq, bool is_ft8) {
+    int num_decoded = 0;
+    message_t **decoded_hashtable = calloc(sizeof(message_t *), max_decoded);
+    
+    for (int idx = 0; idx < num_candidates; ++idx) {
+        const candidate_t* cand = &candidate_list[idx];
+        if (cand->score < kMin_score)
+            continue;
+
+        float const freq_hz = (cand->freq_offset + (float)cand->freq_sub / wf->freq_osr) / (is_ft8 ? FT8_SYMBOL_PERIOD : FT4_SYMBOL_PERIOD);
+        float const time_sec = (cand->time_offset + (float)cand->time_sub / wf->time_osr) * (is_ft8 ? FT8_SYMBOL_PERIOD : FT4_SYMBOL_PERIOD);
+
+        message_t message = {0};
+        decode_status_t status = {0};
+        uint8_t plain174[FTX_LDPC_N];
+        if (!ft8_decode(wf, cand, &message, ldpc_iterations, &status, plain174)) {
+            if (status.ldpc_errors > 0) {
+                LOG(LOG_DEBUG, "LDPC decode: %d errors\n", status.ldpc_errors);
+            } else if (status.crc_calculated != status.crc_extracted) {
+                LOG(LOG_DEBUG, "CRC mismatch!\n");
+            } else if (status.unpack_status != 0) {
+                LOG(LOG_DEBUG, "Error while unpacking!\n");
+            }
+            continue;
+        }
+
+        message.freq_hz = freq_hz;
+        message.time_sec = time_sec;
+        message.score = cand->score;
+        message.snr_raw_db = estimate_candidate_snr_db_2500(wf, cand, plain174, noise_power);
+        {
+            float snr = FT8_SNR_RAW_SCALE * message.snr_raw_db + FT8_SNR_SCORE_SCALE * (float)message.score + FT8_SNR_OFFSET;
+            if (snr < FT8_SNR_MIN_DB)
+                snr = FT8_SNR_MIN_DB;
+            if (snr > FT8_SNR_MAX_DB)
+                snr = FT8_SNR_MAX_DB;
+            message.snr_db = snr;
+        }
+
+        LOG(LOG_DEBUG, "Checking hash table for %4.1fs / %4.1fHz [%d]...\n", time_sec, freq_hz, cand->score);
+        int idx_hash = message.hash % max_decoded;
+        bool found_empty_slot = false;
+        bool found_duplicate = false;
+        do {
+            if (decoded_hashtable[idx_hash] == NULL) {
+                LOG(LOG_DEBUG, "Found an empty slot\n");
+                found_empty_slot = true;
+            } else if ((decoded_hashtable[idx_hash]->hash == message.hash) && (0 == strcmp(decoded_hashtable[idx_hash]->text, message.text))) {
+                LOG(LOG_DEBUG, "Found a duplicate [%s]\n", message.text);
+                found_duplicate = true;
+            } else {
+                LOG(LOG_DEBUG, "Hash table clash!\n");
+                idx_hash = (idx_hash + 1) % max_decoded;
+            }
+        } while (!found_empty_slot && !found_duplicate);
+
+        if (found_empty_slot) {
+            decoded[idx_hash] = message;
+            decoded_hashtable[idx_hash] = &decoded[idx_hash];
+            ++num_decoded;
+        }
+    }
+    
+    // Sort messages by frequency and push empty entries to end
+    qsort(decoded_hashtable, max_decoded, sizeof(message_t *), mcompare);
+    
+    // Output messages
+    double tbase = tmp->tm_sec;
+    tbase = is_ft8 ? fmod(tbase, 15.0) : fmod(tbase, 7.5);
+    tbase += sec;
+    for(int i = 0; i < num_decoded; i++){
+        message_t const *mp = decoded_hashtable[i];
+        if(mp == NULL)
+            continue;
+        fprintf(stdout, "%4d/%02d/%02d %02d:%02d:%02d %3d %+4.2lf %'.1lf ~ %s\n",
+            tmp->tm_year + 1900, tmp->tm_mon + 1, tmp->tm_mday,
+            tmp->tm_hour, tmp->tm_min, tmp->tm_sec,
+            (int)lroundf(mp->snr_db),
+            tbase + mp->time_sec,
+            1.0e6 * base_freq + mp->freq_hz,
+            mp->text);
+    }
+    free(decoded_hashtable);
+    return num_decoded;
+}
+
+// ------------------------------------------------------------------------------------
+// ORIGINAL: Process a buffer already loaded from a file (kept for reference)
 // Pass precise time of signal[0] (including fractional second) so we can reference to it
 // ------------------------------------------------------------------------------------
-int process_buffer(float const *signal,int sample_rate, int num_samples, bool is_ft8, float base_freq, struct tm const *tmp, double sec){
+int process_buffer_ori(float const *signal,int sample_rate, int num_samples, bool is_ft8, float base_freq, struct tm const *tmp, double sec){
   assert(signal != NULL && tmp != NULL);
 
   struct timespec t_wf0 = {0};
@@ -393,11 +500,7 @@ int process_buffer(float const *signal,int sample_rate, int num_samples, bool is
 
   monitor_init(&mon, &mon_cfg);
   LOG(LOG_DEBUG, "Waterfall allocated %d blocks of size %d\n", mon.wf.max_blocks, mon.block_size);
-  for (int frame_pos = 0; frame_pos + mon.block_size <= num_samples; frame_pos += mon.block_size){
-      // Process the waveform data frame by frame - you could have a live loop here with data from an audio device
-      // (cool, now that we can get sample timings - KA9Q)
-      monitor_process(&mon, signal + frame_pos);
-  }
+  accumulate_waterfall(&mon, signal, num_samples);
 
  clock_gettime(CLOCK_MONOTONIC, &t_wf1);
   LOG(LOG_INFO, "Waterfall accumulation: %d blocks in %.3f ms\n", mon.wf.num_blocks, elapsed_ms(&t_wf0, &t_wf1));
@@ -517,4 +620,62 @@ int process_buffer(float const *signal,int sample_rate, int num_samples, bool is
 
   monitor_free(&mon);
   return 0; // Caller frees signal
+}
+
+// ------------------------------------------------------------------------------------
+// REFACTORED: Process a buffer using three discrete phases
+// Phase 1: Waterfall Accumulation (~14.8ms for typical signal)
+// Phase 2: Candidate Search (~22ms for typical signal)  
+// Phase 3: Message Decoding (~55ms for typical signal)
+// ------------------------------------------------------------------------------------
+int process_buffer(float const *signal, int sample_rate, int num_samples, bool is_ft8, float base_freq, struct tm const *tmp, double sec){
+  assert(signal != NULL && tmp != NULL);
+
+  struct timespec t_phase0 = {0};
+  struct timespec t_phase1 = {0};
+  struct timespec t_phase2 = {0};
+  struct timespec t_phase3 = {0};
+
+  LOG(LOG_INFO, "Sample rate %d Hz, %d samples, %.3f seconds\n", sample_rate, num_samples, (double)num_samples / sample_rate);
+
+  clock_gettime(CLOCK_MONOTONIC, &t_phase0);
+
+  // Initialize monitor
+  monitor_t mon = {0};
+  monitor_config_t const mon_cfg = {
+    .f_min = 100,
+    .f_max = sample_rate/2 - 500,
+    .sample_rate = sample_rate,
+    .time_osr = kTime_osr,
+    .freq_osr = kFreq_osr,
+    .protocol = is_ft8 ? PROTO_FT8 : PROTO_FT4
+  };
+  monitor_init(&mon, &mon_cfg);
+  LOG(LOG_DEBUG, "Waterfall allocated %d blocks of size %d\n", mon.wf.max_blocks, mon.block_size);
+
+  // Phase 1: Waterfall Accumulation
+  accumulate_waterfall(&mon, signal, num_samples);
+  clock_gettime(CLOCK_MONOTONIC, &t_phase1);
+  LOG(LOG_INFO, "Phase 1 - Waterfall accumulation: %d blocks in %.3f ms\n", mon.wf.num_blocks, elapsed_ms(&t_phase0, &t_phase1));
+  LOG(LOG_INFO, "Max magnitude: %.1f dB\n", mon.max_mag);
+  
+  float const noise_power = estimate_global_noise_power(&mon.wf);
+  
+  // Phase 2: Candidate Search
+  int const candidate_size = (mon_cfg.f_max * kMax_candidates) / 3000;
+  candidate_t candidate_list[candidate_size];
+  int num_candidates = find_candidates(&mon.wf, candidate_list, candidate_size, kMin_score);
+  clock_gettime(CLOCK_MONOTONIC, &t_phase2);
+  LOG(LOG_INFO, "Phase 2 - Candidate search: Found %d candidates in %.3f ms\n", num_candidates, elapsed_ms(&t_phase1, &t_phase2));
+
+  // Phase 3: Message Decoding
+  message_t *decoded = calloc(sizeof(message_t), kMax_decoded_messages);
+  int num_decoded = decode_candidates(&mon.wf, candidate_list, num_candidates, decoded, kMax_decoded_messages,
+                                      is_ft8 ? FT8_LDPC_ITERATIONS : 120, noise_power, tmp, sec, base_freq, is_ft8);
+  clock_gettime(CLOCK_MONOTONIC, &t_phase3);
+  LOG(LOG_INFO, "Phase 3 - Message decoding: Decoded %d messages in %.3f ms\n", num_decoded, elapsed_ms(&t_phase2, &t_phase3));
+
+  free(decoded);
+  monitor_free(&mon);
+  return 0;
 }
