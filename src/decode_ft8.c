@@ -380,12 +380,33 @@ int find_candidates(const waterfall_t* wf, candidate_t* candidate_list, int cand
     return ft8_find_sync(wf, candidate_size, candidate_list, min_score);
 }
 
+static bool emitted_messages_contains(const message_t* seen_messages, int seen_count, const message_t* msg)
+{
+  for (int i = 0; i < seen_count; ++i)
+  {
+    if (seen_messages[i].hash == msg->hash && strcmp(seen_messages[i].text, msg->text) == 0)
+      return true;
+  }
+  return false;
+}
+
+static void emitted_messages_add(message_t* seen_messages, int* seen_count, int seen_capacity, const message_t* msg)
+{
+  if (seen_messages == NULL || seen_count == NULL)
+    return;
+  if (*seen_count >= seen_capacity)
+    return;
+  seen_messages[*seen_count] = *msg;
+  ++(*seen_count);
+}
+
 // ------------------------------------------------------------------------------------
 // Step 3: Message Decoding
 // ------------------------------------------------------------------------------------
 int decode_candidates(const waterfall_t* wf, const candidate_t* candidate_list, int num_candidates,
                       message_t* decoded, int max_decoded, int ldpc_iterations, float noise_power,
-                      struct tm const* tmp, double sec, float base_freq, bool is_ft8) {
+                      struct tm const* tmp, double sec, float base_freq, bool is_ft8,
+                      message_t* seen_messages, int* seen_count, int seen_capacity) {
     int num_decoded = 0;
     message_t **decoded_hashtable = calloc(sizeof(message_t *), max_decoded);
     
@@ -402,7 +423,7 @@ int decode_candidates(const waterfall_t* wf, const candidate_t* candidate_list, 
         uint8_t plain174[FTX_LDPC_N];
         if (!ft8_decode(wf, cand, &message, ldpc_iterations, &status, plain174)) {
             if (status.ldpc_errors > 0) {
-                LOG(LOG_DEBUG, "LDPC decode: %d errors\n", status.ldpc_errors);
+                // LOG(LOG_DEBUG, "LDPC decode: %d errors\n", status.ldpc_errors);
             } else if (status.crc_calculated != status.crc_extracted) {
                 LOG(LOG_DEBUG, "CRC mismatch!\n");
             } else if (status.unpack_status != 0) {
@@ -424,19 +445,19 @@ int decode_candidates(const waterfall_t* wf, const candidate_t* candidate_list, 
             message.snr_db = snr;
         }
 
-        LOG(LOG_DEBUG, "Checking hash table for %4.1fs / %4.1fHz [%d]...\n", time_sec, freq_hz, cand->score);
+        // LOG(LOG_DEBUG, "Checking hash table with %4.1fs start offset / %4.1fHz offset [score %d]...\n", time_sec, freq_hz, cand->score);
         int idx_hash = message.hash % max_decoded;
         bool found_empty_slot = false;
         bool found_duplicate = false;
         do {
             if (decoded_hashtable[idx_hash] == NULL) {
-                LOG(LOG_DEBUG, "Found an empty slot\n");
+                // LOG(LOG_DEBUG, "Found an empty slot\n");
                 found_empty_slot = true;
             } else if ((decoded_hashtable[idx_hash]->hash == message.hash) && (0 == strcmp(decoded_hashtable[idx_hash]->text, message.text))) {
-                LOG(LOG_DEBUG, "Found a duplicate [%s]\n", message.text);
+                // LOG(LOG_DEBUG, "Found a duplicate [%s]\n", message.text);
                 found_duplicate = true;
             } else {
-                LOG(LOG_DEBUG, "Hash table clash!\n");
+                LOG(LOG_ERROR, "Hash table clash!\n");
                 idx_hash = (idx_hash + 1) % max_decoded;
             }
         } while (!found_empty_slot && !found_duplicate);
@@ -459,7 +480,18 @@ int decode_candidates(const waterfall_t* wf, const candidate_t* candidate_list, 
         message_t const *mp = decoded_hashtable[i];
         if(mp == NULL)
             continue;
-        fprintf(stdout, "%4d/%02d/%02d %02d:%02d:%02d %3d %+4.2lf %'.1lf ~ %s\n",
+
+      if (seen_messages != NULL && seen_count != NULL && seen_capacity > 0)
+      {
+        if (emitted_messages_contains(seen_messages, *seen_count, mp))
+        {
+          // LOG(LOG_DEBUG, "Suppressing duplicate message across stream phases [%s]\n", mp->text);
+          continue;
+        }
+        emitted_messages_add(seen_messages, seen_count, seen_capacity, mp);
+      }
+
+      OUT("%4d/%02d/%02d %02d:%02d:%02d %3d %+4.2lf %'.1lf ~ %s\n",
             tmp->tm_year + 1900, tmp->tm_mon + 1, tmp->tm_mday,
             tmp->tm_hour, tmp->tm_min, tmp->tm_sec,
             (int)lroundf(mp->snr_db),
@@ -469,6 +501,196 @@ int decode_candidates(const waterfall_t* wf, const candidate_t* candidate_list, 
     }
     free(decoded_hashtable);
     return num_decoded;
+}
+
+struct process_stream
+{
+    monitor_t mon;
+    monitor_config_t mon_cfg;
+    float* carry;
+    int carry_samples;
+    bool finalized;
+    bool is_ft8;
+    float base_freq;
+    struct tm utc;
+    double utc_frac_sec;
+    bool checkpoint_done;
+    message_t* seen_messages;
+    int seen_count;
+    int seen_capacity;
+};
+
+  static int stream_decode_pass(process_stream_t* stream, const char* phase_name)
+  {
+    struct timespec t_cand0 = {0};
+    struct timespec t_cand1 = {0};
+    struct timespec t_dec1 = {0};
+
+    float const noise_power = estimate_global_noise_power(&stream->mon.wf);
+    int candidate_size = (stream->mon_cfg.f_max * kMax_candidates) / 3000;
+    if (candidate_size < 1)
+      candidate_size = 1;
+    candidate_t candidate_list[candidate_size];
+
+    clock_gettime(CLOCK_MONOTONIC, &t_cand0);
+    int num_candidates = find_candidates(&stream->mon.wf, candidate_list, candidate_size, kMin_score);
+    clock_gettime(CLOCK_MONOTONIC, &t_cand1);
+
+    message_t* decoded = calloc((size_t)kMax_decoded_messages, sizeof(*decoded));
+    if (decoded == NULL)
+      return -1;
+
+    int num_decoded = decode_candidates(&stream->mon.wf,
+                      candidate_list,
+                      num_candidates,
+                      decoded,
+                      kMax_decoded_messages,
+                      stream->is_ft8 ? FT8_LDPC_ITERATIONS : 120,
+                      noise_power,
+                      &stream->utc,
+                      stream->utc_frac_sec,
+                      stream->base_freq,
+                      stream->is_ft8,
+                      stream->seen_messages,
+                      &stream->seen_count,
+                      stream->seen_capacity);
+    clock_gettime(CLOCK_MONOTONIC, &t_dec1);
+
+    LOG(LOG_INFO,
+      "Streaming %s decode: %d candidates in %.3f ms, %d decoded in %.3f ms (emitted unique this slot: %d)\n",
+      phase_name,
+      num_candidates,
+      elapsed_ms(&t_cand0, &t_cand1),
+      num_decoded,
+      elapsed_ms(&t_cand1, &t_dec1),
+      stream->seen_count);
+
+    free(decoded);
+    return num_decoded;
+  }
+
+process_stream_t* process_stream_open(int sample_rate, bool is_ft8, float base_freq, struct tm const *tmp, double fsec)
+{
+    if (sample_rate <= 0 || tmp == NULL)
+      return NULL;
+
+    process_stream_t* stream = calloc(1, sizeof(*stream));
+    if (stream == NULL)
+      return NULL;
+
+    stream->mon_cfg.f_min = 100;
+    stream->mon_cfg.f_max = sample_rate / 2 - 500;
+    stream->mon_cfg.sample_rate = sample_rate;
+    stream->mon_cfg.time_osr = kTime_osr;
+    stream->mon_cfg.freq_osr = kFreq_osr;
+    stream->mon_cfg.protocol = is_ft8 ? PROTO_FT8 : PROTO_FT4;
+
+    stream->is_ft8 = is_ft8;
+    stream->base_freq = base_freq;
+    stream->utc = *tmp;
+    stream->utc_frac_sec = fsec;
+
+    monitor_init(&stream->mon, &stream->mon_cfg);
+    stream->carry = malloc((size_t)stream->mon.block_size * sizeof(stream->carry[0]));
+    if (stream->carry == NULL)
+    {
+      monitor_free(&stream->mon);
+      free(stream);
+      return NULL;
+    }
+
+    stream->seen_capacity = 2 * kMax_decoded_messages;
+    stream->seen_messages = calloc((size_t)stream->seen_capacity, sizeof(*stream->seen_messages));
+    if (stream->seen_messages == NULL)
+    {
+      free(stream->carry);
+      monitor_free(&stream->mon);
+      free(stream);
+      return NULL;
+    }
+
+    LOG(LOG_DEBUG, "Streaming waterfall open: block_size=%d, max_blocks=%d\n", stream->mon.block_size, stream->mon.wf.max_blocks);
+    return stream;
+}
+
+int process_stream_append_float(process_stream_t* stream, const float* signal, int num_samples)
+{
+    if (stream == NULL || signal == NULL || num_samples < 0 || stream->finalized)
+      return -1;
+    if (num_samples == 0)
+      return 0;
+
+    int pos = 0;
+    int blocks_processed = 0;
+    const int checkpoint_blocks = stream->is_ft8 ? FT8_NN : FT4_NN;
+    while (pos < num_samples)
+    {
+      int remaining = num_samples - pos;
+
+      if (stream->carry_samples == 0 && remaining >= stream->mon.block_size)
+      {
+        monitor_process(&stream->mon, signal + pos);
+        pos += stream->mon.block_size;
+        ++blocks_processed;
+        if (!stream->checkpoint_done && stream->mon.wf.num_blocks >= checkpoint_blocks)
+        {
+          LOG(LOG_INFO, "ckpoint reached: %d symbols accumulated\n", stream->mon.wf.num_blocks);
+          if (stream_decode_pass(stream, "checkpoint") < 0)
+            return -1;
+          stream->checkpoint_done = true;
+        }
+        continue;
+      }
+
+      int needed = stream->mon.block_size - stream->carry_samples;
+      int to_copy = (remaining < needed) ? remaining : needed;
+      memcpy(stream->carry + stream->carry_samples, signal + pos, (size_t)to_copy * sizeof(stream->carry[0]));
+      stream->carry_samples += to_copy;
+      pos += to_copy;
+
+      if (stream->carry_samples == stream->mon.block_size)
+      {
+        monitor_process(&stream->mon, stream->carry);
+        stream->carry_samples = 0;
+        ++blocks_processed;
+        if (!stream->checkpoint_done && stream->mon.wf.num_blocks >= checkpoint_blocks)
+        {
+          LOG(LOG_INFO, "Streaming checkpoint reached: %d symbols accumulated\n", stream->mon.wf.num_blocks);
+          if (stream_decode_pass(stream, "checkpoint") < 0)
+            return -1;
+          stream->checkpoint_done = true;
+        }
+      }
+    }
+
+    return blocks_processed;
+}
+
+int process_stream_finalize(process_stream_t* stream)
+{
+    if (stream == NULL)
+      return -1;
+    if (stream->finalized)
+      return 0;
+
+    stream->finalized = true;
+
+    if (stream->carry_samples > 0)
+    {
+      LOG(LOG_INFO, "Streaming finalize: dropping %d tail samples (< %d block size)\n", stream->carry_samples, stream->mon.block_size);
+    }
+
+    return stream_decode_pass(stream, "final");
+}
+
+void process_stream_close(process_stream_t* stream)
+{
+    if (stream == NULL)
+      return;
+    monitor_free(&stream->mon);
+    free(stream->carry);
+    free(stream->seen_messages);
+    free(stream);
 }
 
 // ------------------------------------------------------------------------------------
@@ -561,7 +783,7 @@ int process_buffer_ori(float const *signal,int sample_rate, int num_samples, boo
         message.snr_db = snr;
       }
 
-      LOG(LOG_DEBUG, "Checking hash table for %4.1fs / %4.1fHz [%d]...\n", time_sec, freq_hz, cand->score);
+      LOG(LOG_DEBUG, "Checking hash table with %4.1fs start offset / %4.1fHz offset [score %d]...\n", time_sec, freq_hz, cand->score);
       int idx_hash = message.hash % kMax_decoded_messages;
       bool found_empty_slot = false;
       bool found_duplicate = false;
@@ -603,7 +825,7 @@ int process_buffer_ori(float const *signal,int sample_rate, int num_samples, boo
     if(mp == NULL)
       continue; // Shouldn't happen
 
-    fprintf(stdout,"%4d/%02d/%02d %02d:%02d:%02d %3d %+4.2lf %'.1lf ~ %s\n",
+    OUT("%4d/%02d/%02d %02d:%02d:%02d %3d %+4.2lf %'.1lf ~ %s\n",
 	    tmp->tm_year + 1900,
 	    tmp->tm_mon + 1,
 	    tmp->tm_mday,
@@ -671,7 +893,8 @@ int process_buffer(float const *signal, int sample_rate, int num_samples, bool i
   // Phase 3: Message Decoding
   message_t *decoded = calloc(sizeof(message_t), kMax_decoded_messages);
   int num_decoded = decode_candidates(&mon.wf, candidate_list, num_candidates, decoded, kMax_decoded_messages,
-                                      is_ft8 ? FT8_LDPC_ITERATIONS : 120, noise_power, tmp, sec, base_freq, is_ft8);
+                                      is_ft8 ? FT8_LDPC_ITERATIONS : 120, noise_power, tmp, sec, base_freq, is_ft8,
+                                      NULL, NULL, 0);
   clock_gettime(CLOCK_MONOTONIC, &t_phase3);
   LOG(LOG_INFO, "Phase 3 - Message decoding: Decoded %d messages in %.3f ms\n", num_decoded, elapsed_ms(&t_phase2, &t_phase3));
 

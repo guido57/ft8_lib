@@ -9,4 +9,6 @@ decode_slot_example
 
 # PlatformIO
 .pio/
-data/
+
+secrets.h
+

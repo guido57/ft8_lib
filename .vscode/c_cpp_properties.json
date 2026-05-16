@@ -9,6 +9,7 @@
             "name": "PlatformIO",
             "includePath": [
                 "/home/guido/Documents/PlatformIO/Projects/ft8_lib/src",
+                "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                 "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/LittleFS/src",
                 "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/FS/src",
                 "/home/guido/Documents/PlatformIO/Projects/ft8_lib",
@@ -238,7 +239,6 @@
                 "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/USB/src",
                 "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/Update/src",
                 "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src",
-                "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                 "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src",
                 "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/WiFiProv/src",
                 "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
@@ -248,6 +248,7 @@
                 "limitSymbolsToIncludedHeaders": true,
                 "path": [
                     "/home/guido/Documents/PlatformIO/Projects/ft8_lib/src",
+                    "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                     "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/LittleFS/src",
                     "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/FS/src",
                     "/home/guido/Documents/PlatformIO/Projects/ft8_lib",
@@ -477,7 +478,6 @@
                     "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/USB/src",
                     "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/Update/src",
                     "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src",
-                    "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                     "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src",
                     "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/WiFiProv/src",
                     "/home/guido/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",

@@ -21,6 +21,15 @@ extern "C"
   // fsec = fractional second in UTC @ signal[0]
   int process_buffer(float const *signal,int sample_rate, int num_samples, bool is_ft8, float base_freq, struct tm const *tmp, double fsec);
 
+  // Opaque streaming decode state used by decoder_api wrappers.
+  typedef struct process_stream process_stream_t;
+
+  // Open/append/finalize/close streaming decode pipeline.
+  process_stream_t* process_stream_open(int sample_rate, bool is_ft8, float base_freq, struct tm const *tmp, double fsec);
+  int process_stream_append_float(process_stream_t* stream, const float* signal, int num_samples);
+  int process_stream_finalize(process_stream_t* stream);
+  void process_stream_close(process_stream_t* stream);
+
 #ifdef __cplusplus
 }
 #endif
