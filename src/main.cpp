@@ -31,8 +31,8 @@
 #include <unistd.h>
 #endif
 
-#include "ft8/decoder_api.h"
-#include "ft8/decode.h"
+#include "ft8_decode/decoder_api.h"
+#include "ft8_decode/decode.h"
 #include "common/debug.h"
 #include "secrets.h"
 
@@ -62,6 +62,18 @@ static void get_utc_now(struct tm* utc, double* frac_sec)
     time_t sec = tv.tv_sec;
     gmtime_r(&sec, utc);
     *frac_sec = (double)tv.tv_usec / 1000000.0;
+}
+
+static void format_utc_hhmmss_mmm(char* buf, size_t buf_len, const struct timeval& tv)
+{
+    struct tm utc = {0};
+    time_t sec = tv.tv_sec;
+    gmtime_r(&sec, &utc);
+    snprintf(buf, buf_len, "%02d:%02d:%02d.%03d",
+             utc.tm_hour,
+             utc.tm_min,
+             utc.tm_sec,
+             (int)(tv.tv_usec / 1000));
 }
 
 static double seconds_to_next_ft8_slot(const struct tm* utc, double frac_sec)
@@ -189,6 +201,7 @@ static constexpr int kMaxPathLen = 96;
 static constexpr int kSampleQueueDepth = 32768;
 static constexpr int kProducerPrefetchSamples = 32768;
 static constexpr int kProducerStartupPrefillSamples = 2048;
+static constexpr int kProducerOutputSampleRate = 8000;
 
 typedef struct {
     ft8_stream_decoder_t* stream;
@@ -473,16 +486,21 @@ static void sample_producer_task(void* /*arg*/)
             continue;
         }
 
-        const bool is_ft8 = true;
-        const float base_freq_mhz = 14.074f;
-        const int sample_rate = (int)wav->sample_rate;
-        const int slot_samples = (int)(15.0f * sample_rate + 0.5f);
-        const int symbol_samples = (int)(0.160f * sample_rate + 0.5f);
-        const int checkpoint_samples = is_ft8 ? (79 * symbol_samples) : 0;
+        const int source_sample_rate = (int)wav->sample_rate;
+        const int output_sample_rate = kProducerOutputSampleRate;
+        const int slot_samples = (int)(15.0f * output_sample_rate + 0.5f);
+        if (source_sample_rate <= 0 || output_sample_rate <= 0) {
+            Serial.printf("[ft8] Invalid sample rate for %s (src=%d, out=%d)\n",
+                          wav_paths[idx],
+                          source_sample_rate,
+                          output_sample_rate);
+            wav_stream_close(wav);
+            continue;
+        }
 
         // Publish stream format before boundary wait so consumer aligns to the same first slot.
         if (g_active_sample_rate == 0) {
-            g_active_sample_rate = sample_rate;
+            g_active_sample_rate = output_sample_rate;
         }
 
         if (idx == 0) {
@@ -533,35 +551,95 @@ static void sample_producer_task(void* /*arg*/)
             sleep_until_mono_us(slot_start_deadline_us);
         }
 
+        struct timeval producer_start_tv = {0};
+        gettimeofday(&producer_start_tv, nullptr);
+        char producer_start_buf[32] = {0};
+        format_utc_hhmmss_mmm(producer_start_buf, sizeof(producer_start_buf), producer_start_tv);
+        const int64_t producer_start_us = esp_timer_get_time();
+
+        Serial.printf("[ft8] Producer slot #%d @ %s (target %d Hz)\n",
+                      idx + 1,
+                      producer_start_buf,
+                      output_sample_rate);
+
         const int64_t slot_end_deadline_us = slot_start_deadline_us + 15000000LL;
         int sent_samples = 0;
-        for (int i = 0; i < slot_samples; ++i) {
-            if (esp_timer_get_time() >= slot_end_deadline_us) {
-                Serial.printf("[ft8] %s slot cutoff at boundary: sent %d/%d samples\n", wav_paths[idx], i, slot_samples);
-                break;
-            }
+        int source_samples_consumed = 0;
+        int16_t current_sample = 0;
+        bool has_current_sample = false;
+        int downsample_phase = 0;
 
+        auto pop_source_sample = [&](int16_t* out_sample, int out_i) -> bool {
             if (prefetch.count <= (prefetch.capacity / 2)) {
                 if (!fill_sample_ring_from_wav(&prefetch, wav, prefetch.capacity)) {
-                    Serial.printf("[ft8] Failed to refill samples for %s at sample %d\n", wav_paths[idx], i);
-                    break;
+                    Serial.printf("[ft8] Failed to refill samples for %s at output sample %d\n", wav_paths[idx], out_i);
+                    return false;
                 }
             }
 
-            int16_t sample = 0;
-            if (!sample_ring_pop(&prefetch, &sample)) {
-                Serial.printf("[ft8] Producer prefetch underrun for %s at sample %d\n", wav_paths[idx], i);
+            if (!sample_ring_pop(&prefetch, out_sample)) {
+                Serial.printf("[ft8] Producer prefetch underrun for %s at output sample %d\n", wav_paths[idx], out_i);
+                return false;
+            }
+            return true;
+        };
+
+        // Real-time resampling for 12 kHz inputs:
+        // 1) duplicate each source sample to form a 24 kHz virtual stream
+        // 2) emit 1 sample out of every 3 virtual samples to produce 8 kHz
+        while (sent_samples < slot_samples) {
+            if (esp_timer_get_time() >= slot_end_deadline_us) {
+                Serial.printf("[ft8] %s slot cutoff at boundary: sent %d/%d samples\n",
+                              wav_paths[idx],
+                              sent_samples,
+                              slot_samples);
                 break;
             }
-            xQueueSend(g_sample_queue, &sample, portMAX_DELAY);
-            sent_samples = i + 1;
 
-            if (((i & 63) == 63) || (i + 1 == slot_samples)) {
-                int64_t target_us = slot_start_deadline_us + ((int64_t)(i + 1) * 1000000LL) / (int64_t)sample_rate;
-                if (target_us < slot_end_deadline_us) {
-                    sleep_until_mono_us(target_us);
+            if (!has_current_sample) {
+                if (!pop_source_sample(&current_sample, source_samples_consumed)) {
+                    break;
                 }
+                has_current_sample = true;
             }
+
+            for (int dup = 0; dup < 2 && sent_samples < slot_samples; ++dup) {
+                const int16_t virtual_sample = current_sample;
+
+                if (downsample_phase == 0) {
+                    xQueueSend(g_sample_queue, &virtual_sample, portMAX_DELAY);
+                    ++sent_samples;
+
+                    if (((sent_samples & 63) == 63) || (sent_samples == slot_samples)) {
+                        int64_t target_us = slot_start_deadline_us + ((int64_t)sent_samples * 1000000LL) / (int64_t)output_sample_rate;
+                        if (target_us < slot_end_deadline_us) {
+                            sleep_until_mono_us(target_us);
+                        }
+                    }
+                }
+
+                downsample_phase = (downsample_phase + 1) % 3;
+            }
+
+            ++source_samples_consumed;
+            has_current_sample = false;
+        }
+
+        const int64_t producer_end_us = esp_timer_get_time();
+        const double producer_elapsed_sec = (double)(producer_end_us - producer_start_us) / 1000000.0;
+        if (producer_elapsed_sec > 0.0) {
+            struct timeval producer_end_tv = {0};
+            gettimeofday(&producer_end_tv, nullptr);
+            char producer_end_buf[32] = {0};
+            format_utc_hhmmss_mmm(producer_end_buf, sizeof(producer_end_buf), producer_end_tv);
+            const double measured_rate = (double)sent_samples / producer_elapsed_sec;
+            Serial.printf("[ft8] Producer slot #%d done @ %s: %d samples in %.3f s = %.1f Hz (target %d Hz)\n",
+                          idx + 1,
+                          producer_end_buf,
+                          sent_samples,
+                          producer_elapsed_sec,
+                          measured_rate,
+                          output_sample_rate);
         }
 
         if (sent_samples < slot_samples) {
@@ -635,12 +713,11 @@ static void decoder_consumer_task(void* /*arg*/)
         }
         int64_t slot_end_us = esp_timer_get_time() + (int64_t)(remain_slot_sec * 1000000.0 + 0.5);
 
-        Serial.printf("[ft8] Slot start #%d @ %02d:%02d:%02d.%03d (%d Hz)\n",
+        char slot_time_buf[32] = {0};
+        format_utc_hhmmss_mmm(slot_time_buf, sizeof(slot_time_buf), tv_now);
+        Serial.printf("[ft8] Slot start #%d @ %s (%d Hz)\n",
                       slot_index + 1,
-                      utc_start.tm_hour,
-                      utc_start.tm_min,
-                      utc_start.tm_sec,
-                      (int)(utc_frac_start * 1000.0 + 0.5),
+                      slot_time_buf,
                       sample_rate);
 
         ft8_decode_context_t ctx = {};
@@ -660,6 +737,7 @@ static void decoder_consumer_task(void* /*arg*/)
         int blocks = 0;
         bool checkpoint_logged = false;
         bool ingest_failed = false;
+        const int64_t producer_start_us = esp_timer_get_time();
 
 
         for (;;) {
@@ -770,7 +848,7 @@ void setup()
     BaseType_t rc_consumer = xTaskCreatePinnedToCore(
         decoder_consumer_task,
         "ft8_consumer",
-        32768,
+        12288,
         nullptr,
         2,
         nullptr,
@@ -790,7 +868,7 @@ void setup()
     BaseType_t rc_finalize = xTaskCreatePinnedToCore(
         finalize_worker_task,
         "ft8_finalize",
-        32768,
+        24576,
         nullptr,
         1,
         nullptr,
@@ -935,7 +1013,7 @@ int main(int argc, char** argv)
     }
 
     const int chunk_samples = 960;
-    float* chunk = alloc_sample_buffer((size_t)chunk_samples);
+    int16_t* chunk = (int16_t*)malloc((size_t)chunk_samples * sizeof(*chunk));
     if (chunk == NULL) {
         free(signal);
         fprintf(stderr, "Failed to allocate chunk buffer\n");
@@ -946,8 +1024,12 @@ int main(int argc, char** argv)
     ctx.is_ft8 = true;
     ctx.base_freq_mhz = base_freq_mhz;
 
-    const int slot_samples = (int)lround(15.0 * (double)sample_rate);
+    const int output_sample_rate = 8000;
+    const int slot_samples = (int)lround(15.0 * (double)output_sample_rate);
     int source_pos = 0;
+    int downsample_phase = 0;
+    float current_sample = 0.0f;
+    bool has_current_sample = false;
     int slot_index = 0;
     bool run_forever = (slots_to_run == 0);
 
@@ -971,7 +1053,7 @@ int main(int argc, char** argv)
             ctx.utc.tm_sec,
             (int)lround(ctx.utc_frac_sec * 1000.0));
 
-        ft8_stream_decoder_t* stream = ft8_stream_open(sample_rate, &ctx);
+        ft8_stream_decoder_t* stream = ft8_stream_open(output_sample_rate, &ctx);
         if (stream == nullptr)
         {
             free(chunk);
@@ -989,15 +1071,36 @@ int main(int argc, char** argv)
             if (n > chunk_samples)
                 n = chunk_samples;
 
-            for (int i = 0; i < n; ++i)
+            int filled = 0;
+            while (filled < n)
             {
-                chunk[i] = signal[source_pos];
-                ++source_pos;
-                if (source_pos >= num_samples)
-                    source_pos = 0;
+                if (!has_current_sample)
+                {
+                    current_sample = signal[source_pos];
+                    ++source_pos;
+                    if (source_pos >= num_samples)
+                        source_pos = 0;
+                    has_current_sample = true;
+                }
+
+                for (int dup = 0; dup < 2 && filled < n; ++dup)
+                {
+                    if (downsample_phase == 0)
+                    {
+                        float scaled = current_sample * 32767.0f;
+                        if (scaled > 32767.0f)
+                            scaled = 32767.0f;
+                        if (scaled < -32768.0f)
+                            scaled = -32768.0f;
+                        chunk[filled++] = (int16_t)lroundf(scaled);
+                    }
+                    downsample_phase = (downsample_phase + 1) % 3;
+                }
+
+                has_current_sample = false;
             }
 
-            int rc_append = ft8_stream_append_float(stream, chunk, n);
+            int rc_append = ft8_stream_append_i16(stream, chunk, n);
             if (rc_append < 0)
             {
                 ft8_stream_close(stream);
@@ -1010,7 +1113,7 @@ int main(int argc, char** argv)
             blocks += rc_append;
             sent += n;
 
-            struct timespec target = mono_add_seconds(slot_start_mono, (double)sent / (double)sample_rate);
+            struct timespec target = mono_add_seconds(slot_start_mono, (double)sent / (double)output_sample_rate);
             sleep_until_mono(&target);
         }
 

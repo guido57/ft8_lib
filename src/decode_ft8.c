@@ -12,9 +12,9 @@
 #include <assert.h>
 #include <time.h>
 
-#include "ft8/decode.h"
-#include "ft8/constants.h"
-#include "ft8/ft8_config.h"
+#include "ft8_decode/decode.h"
+#include "ft8_decode/constants.h"
+#include "ft8_decode/ft8_config.h"
 
 #include "common/wave.h"
 #include "common/debug.h"
@@ -867,63 +867,3 @@ int process_buffer_ori(float const *signal,int sample_rate, int num_samples, boo
   return 0; // Caller frees signal
 }
 
-// ------------------------------------------------------------------------------------
-// REFACTORED: Process a buffer using three discrete phases
-// Phase 1: Waterfall Accumulation (~14.8ms for typical signal)
-// Phase 2: Candidate Search (~22ms for typical signal)  
-// Phase 3: Message Decoding (~55ms for typical signal)
-// ------------------------------------------------------------------------------------
-int process_buffer(float const *signal, int sample_rate, int num_samples, bool is_ft8, float base_freq, struct tm const *tmp, double sec){
-  assert(signal != NULL && tmp != NULL);
-
-  struct timespec t_phase0 = {0};
-  struct timespec t_phase1 = {0};
-  struct timespec t_phase2 = {0};
-  struct timespec t_phase3 = {0};
-
-  LOG(LOG_INFO, "Sample rate %d Hz, %d samples, %.3f seconds\n", sample_rate, num_samples, (double)num_samples / sample_rate);
-
-  clock_gettime(CLOCK_MONOTONIC, &t_phase0);
-
-  // Initialize monitor
-  monitor_t mon = {0};
-  monitor_config_t const mon_cfg = {
-    .f_min = 100,
-    .f_max = sample_rate/2 - 500,
-    .sample_rate = sample_rate,
-    .time_osr = kTime_osr,
-    .freq_osr = kFreq_osr,
-    .protocol = is_ft8 ? PROTO_FT8 : PROTO_FT4
-  };
-  monitor_init(&mon, &mon_cfg);
-  LOG(LOG_DEBUG, "Waterfall allocated %d blocks of size %d\n", mon.wf.max_blocks, mon.block_size);
-
-  // Phase 1: Waterfall Accumulation
-  accumulate_waterfall(&mon, signal, num_samples);
-  clock_gettime(CLOCK_MONOTONIC, &t_phase1);
-  LOG(LOG_INFO, "Phase 1 - Waterfall accumulation: %d blocks in %.3f ms\n", mon.wf.num_blocks, elapsed_ms(&t_phase0, &t_phase1));
-  LOG(LOG_INFO, "Max magnitude: %.1f dB\n", mon.max_mag);
-  
-  float const noise_power = estimate_global_noise_power(&mon.wf);
-  
-  // Phase 2: Candidate Search
-  int const candidate_size = (mon_cfg.f_max * kMax_candidates) / 3000;
-  candidate_t candidate_list[candidate_size];
-  int num_candidates = find_candidates(&mon.wf, candidate_list, candidate_size, kMin_score);
-  clock_gettime(CLOCK_MONOTONIC, &t_phase2);
-  LOG(LOG_INFO, "Phase 2 - Candidate search: Found %d candidates in %.3f ms\n", num_candidates, elapsed_ms(&t_phase1, &t_phase2));
-
-  // Phase 3: Message Decoding
-  message_t *decoded = calloc(sizeof(message_t), kMax_decoded_messages);
-  int num_decoded = decode_candidates(&mon.wf, candidate_list, num_candidates, decoded, kMax_decoded_messages,
-                                      is_ft8 ? FT8_LDPC_ITERATIONS : 120, noise_power, tmp, sec, base_freq, is_ft8,
-                                      NULL, NULL, 0,
-                                      "full",
-                                      true);
-  clock_gettime(CLOCK_MONOTONIC, &t_phase3);
-  LOG(LOG_INFO, "Phase 3 - Message decoding: Decoded %d messages in %.3f ms\n", num_decoded, elapsed_ms(&t_phase2, &t_phase3));
-
-  free(decoded);
-  monitor_free(&mon);
-  return 0;
-}

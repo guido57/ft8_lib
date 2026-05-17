@@ -12,7 +12,7 @@ env.BuildSources(
     "$PROJECT_DIR",
     src_filter=" ".join([
         "-<*>",              # exclude everything from project root by default
-        "+<ft8/*.c>",        # LDPC, pack/unpack, CRC, text, encode, decode, decoder_api
+        "+<ft8_decode/*.c>",        # LDPC, pack/unpack, CRC, text, encode, decode, decoder_api
         "+<fft/*.c>",        # kiss_fft, kiss_fftr
         "+<common/*.c>",     # wave.c (no-op on ESP32 via #ifndef guard)
     ])

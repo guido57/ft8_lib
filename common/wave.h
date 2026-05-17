@@ -16,11 +16,6 @@ extern "C"
   // Now mallocs signal array, places in *signal, caller must free
   int load_wav(float** signal, int* num_samples, int *num_channels, int* sample_rate, const char* path,int fd);
 
-  // base_freq = radio frequency in Hz corresponding to zero frequency here (receiver is always USB)
-  // tmp = UTC @ signal[0]
-  // fsec = fractional second in UTC @ signal[0]
-  int process_buffer(float const *signal,int sample_rate, int num_samples, bool is_ft8, float base_freq, struct tm const *tmp, double fsec);
-
   // Opaque streaming decode state used by decoder_api wrappers.
   typedef struct process_stream process_stream_t;
 

@@ -1,4 +1,4 @@
-#include "ft8/decoder_api.h"
+#include "ft8_decode/decoder_api.h"
 
 #include <stdlib.h>
 
@@ -7,21 +7,6 @@
 struct ft8_stream_decoder {
     process_stream_t* core;
 };
-
-int ft8_decode_slot(const float* signal, int sample_rate, int num_samples, const ft8_decode_context_t* ctx)
-{
-    if (signal == NULL || ctx == NULL) {
-        return -1;
-    }
-
-    return process_buffer(signal,
-                          sample_rate,
-                          num_samples,
-                          ctx->is_ft8,
-                          ctx->base_freq_mhz,
-                          &ctx->utc,
-                          ctx->utc_frac_sec);
-}
 
 ft8_stream_decoder_t* ft8_stream_open(int sample_rate, const ft8_decode_context_t* ctx)
 {
@@ -44,13 +29,6 @@ ft8_stream_decoder_t* ft8_stream_open(int sample_rate, const ft8_decode_context_
     }
 
     return stream;
-}
-
-int ft8_stream_append_float(ft8_stream_decoder_t* stream, const float* signal, int num_samples)
-{
-    if (stream == NULL)
-        return -1;
-    return process_stream_append_float(stream->core, signal, num_samples);
 }
 
 int ft8_stream_append_i16(ft8_stream_decoder_t* stream, const int16_t* signal, int num_samples)
