@@ -35,6 +35,7 @@
 #include "ft8_decode/decode.h"
 #include "common/debug.h"
 #include "secrets.h"
+#include "ft8_consumer_module.h"
 
 #if defined(ARDUINO_ARCH_ESP32)
 
@@ -204,17 +205,15 @@ static constexpr int kProducerStartupPrefillSamples = 2048;
 static constexpr int kProducerOutputSampleRate = 8000;
 
 typedef struct {
-    ft8_stream_decoder_t* stream;
-    char path[kMaxPathLen];
-    int slot_samples;
-    int ingested_samples;
-    int blocks;
-} finalize_job_t;
-
-static QueueHandle_t g_sample_queue = nullptr;
-static QueueHandle_t g_finalize_queue = nullptr;
-static volatile int g_active_sample_rate = 0;
-
+    File file;
+    uint16_t num_channels;
+    uint32_t sample_rate;
+    uint32_t data_start;
+    uint32_t data_size;
+    uint32_t num_samples;
+    uint32_t sample_index;
+    bool valid;
+} wav_stream_t;
 
 extern "C" void ft8_on_message_decoded(const char* phase,
                                          const struct tm* utc,
@@ -243,17 +242,6 @@ extern "C" void ft8_on_message_decoded(const char* phase,
                   1.0e6 * base_freq_mhz + msg->freq_hz,
                   msg->text);
 }
-
-typedef struct {
-    File file;
-    uint16_t num_channels;
-    uint32_t sample_rate;
-    uint32_t data_start;
-    uint32_t data_size;
-    uint32_t num_samples;
-    uint32_t sample_index;
-    bool valid;
-} wav_stream_t;
 
 typedef struct {
     int16_t* data;
@@ -498,11 +486,6 @@ static void sample_producer_task(void* /*arg*/)
             continue;
         }
 
-        // Publish stream format before boundary wait so consumer aligns to the same first slot.
-        if (g_active_sample_rate == 0) {
-            g_active_sample_rate = output_sample_rate;
-        }
-
         if (idx == 0) {
             struct timeval tv_now = {0};
             gettimeofday(&tv_now, nullptr);
@@ -607,7 +590,7 @@ static void sample_producer_task(void* /*arg*/)
                 const int16_t virtual_sample = current_sample;
 
                 if (downsample_phase == 0) {
-                    xQueueSend(g_sample_queue, &virtual_sample, portMAX_DELAY);
+                    ft8_consumer_module_enqueue_i16(&virtual_sample, 1, portMAX_DELAY);
                     ++sent_samples;
 
                     if (((sent_samples & 63) == 63) || (sent_samples == slot_samples)) {
@@ -661,165 +644,6 @@ static void sample_producer_task(void* /*arg*/)
     vTaskDelete(nullptr);
 }
 
-static void decoder_consumer_task(void* /*arg*/)
-{
-    while (g_active_sample_rate <= 0) {
-        delay(10);
-    }
-
-    const int sample_rate = g_active_sample_rate;
-    const bool is_ft8 = true;
-    const float base_freq_mhz = 14.074f;
-    const int slot_samples = (int)(15.0f * sample_rate + 0.5f);
-    const int symbol_samples = (int)(0.160f * sample_rate + 0.5f);
-    const int checkpoint_samples = is_ft8 ? (79 * symbol_samples) : 0;
-
-    int slot_index = 0;
-    struct timeval tv_now = {0};
-    gettimeofday(&tv_now, nullptr);
-    double now_epoch0 = (double)tv_now.tv_sec + (double)tv_now.tv_usec / 1000000.0;
-    double next_slot_epoch = floor(now_epoch0 / 15.0) * 15.0;
-    if (now_epoch0 - next_slot_epoch > 1e-6) {
-        next_slot_epoch += 15.0;
-    }
-
-    static constexpr int kAppendBatchSize = 256;
-    int16_t append_batch[kAppendBatchSize];
-
-    for (;;) {
-        gettimeofday(&tv_now, nullptr);
-        double now_epoch = (double)tv_now.tv_sec + (double)tv_now.tv_usec / 1000000.0;
-        while (now_epoch >= (next_slot_epoch + 15.0)) {
-            next_slot_epoch += 15.0;
-        }
-
-        double wait_sec = next_slot_epoch - now_epoch;
-        if (wait_sec > 0.0) {
-            sleep_seconds(wait_sec);
-        }
-
-        gettimeofday(&tv_now, nullptr);
-        now_epoch = (double)tv_now.tv_sec + (double)tv_now.tv_usec / 1000000.0;
-
-        time_t slot_start_sec = (time_t)next_slot_epoch;
-        struct tm utc_start = {0};
-        gmtime_r(&slot_start_sec, &utc_start);
-        double utc_frac_start = next_slot_epoch - (double)slot_start_sec;
-
-        double slot_end_epoch = next_slot_epoch + 15.0;
-        double remain_slot_sec = slot_end_epoch - now_epoch;
-        if (remain_slot_sec < 0.0) {
-            remain_slot_sec = 0.0;
-        }
-        int64_t slot_end_us = esp_timer_get_time() + (int64_t)(remain_slot_sec * 1000000.0 + 0.5);
-
-        char slot_time_buf[32] = {0};
-        format_utc_hhmmss_mmm(slot_time_buf, sizeof(slot_time_buf), tv_now);
-        Serial.printf("[ft8] Slot start #%d @ %s (%d Hz)\n",
-                      slot_index + 1,
-                      slot_time_buf,
-                      sample_rate);
-
-        ft8_decode_context_t ctx = {};
-        ctx.is_ft8 = is_ft8;
-        ctx.base_freq_mhz = base_freq_mhz;
-        ctx.utc = utc_start;
-        ctx.utc_frac_sec = utc_frac_start;
-
-        ft8_stream_decoder_t* stream = ft8_stream_open(sample_rate, &ctx);
-        if (stream == nullptr) {
-            Serial.println("[ft8] Failed to open stream decoder");
-            ++slot_index;
-            continue;
-        }
-
-        int ingested_samples = 0;
-        int blocks = 0;
-        bool checkpoint_logged = false;
-        bool ingest_failed = false;
-        const int64_t producer_start_us = esp_timer_get_time();
-
-
-        for (;;) {
-            int64_t now_us = esp_timer_get_time();
-            if (now_us >= slot_end_us) {
-                break;
-            }
-
-            int64_t remain_us = slot_end_us - now_us;
-            TickType_t wait_ticks = pdMS_TO_TICKS((remain_us > 5000LL) ? 5 : (remain_us / 1000LL));
-            if (wait_ticks < 1)
-                wait_ticks = 1;
-
-            int16_t first_sample = 0;
-            if (xQueueReceive(g_sample_queue, &first_sample, wait_ticks) != pdTRUE) {
-                continue;
-            }
-
-            int batch_count = 0;
-            append_batch[batch_count++] = first_sample;
-
-            while (batch_count < kAppendBatchSize) {
-                int16_t sample = 0;
-                if (xQueueReceive(g_sample_queue, &sample, 0) != pdTRUE) {
-                    break;
-                }
-                append_batch[batch_count++] = sample;
-            }
-
-            int rc_append = ft8_stream_append_i16(stream, append_batch, batch_count);
-            if (rc_append < 0) {
-                Serial.printf("[ft8] Stream append failed at sample %d\n", ingested_samples + batch_count - 1);
-                ingest_failed = true;
-                break;
-            }
-
-            ingested_samples += batch_count;
-            blocks += rc_append;
-            if (!checkpoint_logged && checkpoint_samples > 0 && ingested_samples >= checkpoint_samples) {
-                Serial.printf("[ft8] Slot #%d reached checkpoint (%d samples / 79 symbols)\n", slot_index + 1, ingested_samples);
-                checkpoint_logged = true;
-            }
-        }
-
-        if (ingest_failed || ingested_samples == 0) {
-            ft8_stream_close(stream);
-        } else {
-            finalize_job_t fin = {};
-            fin.stream = stream;
-            snprintf(fin.path, kMaxPathLen, "slot-%d", slot_index + 1);
-            fin.slot_samples = slot_samples;
-            fin.ingested_samples = ingested_samples;
-            fin.blocks = blocks;
-            xQueueSend(g_finalize_queue, &fin, portMAX_DELAY);
-        }
-
-        next_slot_epoch += 15.0;
-        ++slot_index;
-    }
-}
-
-static void finalize_worker_task(void* /*arg*/)
-{
-    for (;;) {
-        finalize_job_t fin = {};
-        if (xQueueReceive(g_finalize_queue, &fin, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-
-        int rc_final = ft8_stream_finalize(fin.stream);
-        ft8_stream_close(fin.stream);
-
-        Serial.printf("[ft8] Slot done %s: %d samples ingested, %d full blocks, finalize rc=%d\n",
-                      fin.path,
-                      fin.ingested_samples,
-                      fin.blocks,
-                      rc_final);
-    }
-
-    vTaskDelete(nullptr);
-}
-
 void setup()
 {
     Serial.begin(115200);
@@ -836,24 +660,30 @@ void setup()
     // Initialize NTP for accurate wall-clock time
     init_ntp();
 
-    g_active_sample_rate = 0;
-    
-    g_sample_queue = xQueueCreate(kSampleQueueDepth, sizeof(int16_t));
-    g_finalize_queue = xQueueCreate(4, sizeof(finalize_job_t));
-    if (g_sample_queue == nullptr || g_finalize_queue == nullptr) {
-        Serial.println("[ft8] Failed to create queues");
+    // Configure and initialize the FT8 consumer module
+    ft8_consumer_module_config_t consumer_cfg = {
+        .sample_rate = kProducerOutputSampleRate,
+        .base_freq_mhz = 14.074f,
+        .sample_queue_depth = 2048, // kSampleQueueDepth,
+        .finalize_queue_depth = 4,
+        .append_batch_size = 256,
+        .consumer_task_stack = 8192, // 12288,
+        .finalize_task_stack = 8192, // 24576,
+        .consumer_task_priority = 2,
+        .finalize_task_priority = 1,
+        .consumer_task_core = 0, // APP_CPU_NUM,
+        .finalize_task_core = 0, // APP_CPU_NUM,
+    };
+
+    if (!ft8_consumer_module_init(&consumer_cfg)) {
+        Serial.println("[ft8] Failed to initialize consumer module");
         return;
     }
 
-    BaseType_t rc_consumer = xTaskCreatePinnedToCore(
-        decoder_consumer_task,
-        "ft8_consumer",
-        12288,
-        nullptr,
-        2,
-        nullptr,
-        APP_CPU_NUM
-    );
+    if (!ft8_consumer_module_start()) {
+        Serial.println("[ft8] Failed to start consumer module");
+        return;
+    }
 
     BaseType_t rc_producer = xTaskCreatePinnedToCore(
         sample_producer_task,
@@ -865,21 +695,8 @@ void setup()
         APP_CPU_NUM
     );
 
-    BaseType_t rc_finalize = xTaskCreatePinnedToCore(
-        finalize_worker_task,
-        "ft8_finalize",
-        24576,
-        nullptr,
-        1,
-        nullptr,
-        APP_CPU_NUM
-    );
-
-    if (rc_consumer != pdPASS || rc_producer != pdPASS || rc_finalize != pdPASS) {
-        Serial.printf("[ft8] Failed to create tasks (consumer=%ld producer=%ld finalize=%ld)\n",
-                      (long)rc_consumer,
-                      (long)rc_producer,
-                      (long)rc_finalize);
+    if (rc_producer != pdPASS) {
+        Serial.printf("[ft8] Failed to create producer task (rc=%ld)\n", (long)rc_producer);
     }
 }
 
