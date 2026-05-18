@@ -21,6 +21,11 @@
 #include "fft/kiss_fftr.h"
 #include "fft/kiss_fft.h"
 
+#if defined(ARDUINO_ARCH_ESP32)
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#endif
+
 #ifndef LOG_LEVEL
 #define LOG_LEVEL LOG_DEBUG
 #endif
@@ -425,6 +430,13 @@ int decode_candidates(const waterfall_t* wf, const candidate_t* candidate_list, 
     message_t **decoded_hashtable = calloc(sizeof(message_t *), max_decoded);
     
     for (int idx = 0; idx < num_candidates; ++idx) {
+  #if defined(ARDUINO_ARCH_ESP32)
+      if ((idx & 0x07) == 0) {
+        // Keep cooperative scheduling alive during long finalize decode passes.
+        taskYIELD();
+      }
+  #endif
+
         const candidate_t* cand = &candidate_list[idx];
         if (cand->score < kMin_score)
             continue;

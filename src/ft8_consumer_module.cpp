@@ -90,12 +90,26 @@ static void decoder_consumer_task(void* /*arg*/)
     {
         gettimeofday(&tv_now, nullptr);
         double now_epoch = (double)tv_now.tv_sec + (double)tv_now.tv_usec / 1000000.0;
-        while (now_epoch >= (next_slot_epoch + 15.0))
-            next_slot_epoch += 15.0;
+
+        // Resync in O(1): wall clock can jump on first NTP sync.
+        if (now_epoch >= (next_slot_epoch + 15.0))
+        {
+            next_slot_epoch = floor(now_epoch / 15.0) * 15.0;
+            if (now_epoch - next_slot_epoch > 1e-6)
+                next_slot_epoch += 15.0;
+        }
 
         double wait_sec = next_slot_epoch - now_epoch;
-        if (wait_sec > 0.0)
-            sleep_seconds(wait_sec);
+        while (wait_sec > 0.0)
+        {
+            TickType_t wait_ticks = pdMS_TO_TICKS((wait_sec > 0.010) ? 10 : (uint32_t)(wait_sec * 1000.0));
+            if (wait_ticks < 1)
+                wait_ticks = 1;
+            vTaskDelay(wait_ticks);
+            gettimeofday(&tv_now, nullptr);
+            now_epoch = (double)tv_now.tv_sec + (double)tv_now.tv_usec / 1000000.0;
+            wait_sec = next_slot_epoch - now_epoch;
+        }
 
         gettimeofday(&tv_now, nullptr);
         now_epoch = (double)tv_now.tv_sec + (double)tv_now.tv_usec / 1000000.0;
@@ -132,11 +146,13 @@ static void decoder_consumer_task(void* /*arg*/)
 
         int ingested_samples = 0;
         int blocks = 0;
+        int samples_since_yield = 0;
         bool checkpoint_logged = false;
         bool ingest_failed = false;
 
         for (;;)
         {
+            
             int64_t now_us = esp_timer_get_time();
             if (now_us >= slot_end_us)
                 break;
@@ -149,6 +165,8 @@ static void decoder_consumer_task(void* /*arg*/)
             int16_t first_sample = 0;
             if (xQueueReceive(s_sample_queue, &first_sample, wait_ticks) != pdTRUE)
                 continue;
+
+            // Serial.printf("[ft8] consumer: got %d samples from queue, remain slot time %.3f s\n", 1, (double)(slot_end_us - esp_timer_get_time()) / 1000000.0); 
 
             int batch_count = 0;
             append_batch[batch_count++] = first_sample;
@@ -171,6 +189,15 @@ static void decoder_consumer_task(void* /*arg*/)
 
             ingested_samples += batch_count;
             blocks += rc_append;
+            samples_since_yield += batch_count;
+
+            // Allow IDLE0 to run while queue is continuously full during active slots.
+            if (samples_since_yield >= 512)
+            {
+                vTaskDelay(1);
+                samples_since_yield = 0;
+            }
+
             if (!checkpoint_logged && checkpoint_samples > 0 && ingested_samples >= checkpoint_samples)
             {
                 Serial.printf("[ft8] Slot #%d reached checkpoint (%d samples / 79 symbols)\n", slot_index + 1, ingested_samples);
@@ -190,7 +217,13 @@ static void decoder_consumer_task(void* /*arg*/)
             fin.slot_samples = slot_samples;
             fin.ingested_samples = ingested_samples;
             fin.blocks = blocks;
-            xQueueSend(s_finalize_queue, &fin, portMAX_DELAY);
+
+            // Keep consumer slot timing stable: never block here waiting for finalize queue space.
+            if (xQueueSend(s_finalize_queue, &fin, 0) != pdTRUE)
+            {
+                Serial.printf("[ft8] finalize queue full, dropping slot-%d finalize job\n", fin.slot_index);
+                ft8_stream_close(stream);
+            }
         }
 
         next_slot_epoch += 15.0;
