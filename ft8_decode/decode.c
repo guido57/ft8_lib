@@ -171,7 +171,7 @@ static int ft4_sync_score(const waterfall_t* wf, const candidate_t* candidate)
     return score;
 }
 
-int ft8_find_sync(const waterfall_t* wf, int num_candidates, candidate_t heap[], int min_score)
+int ft8lib_find_sync(const waterfall_t* wf, int num_candidates, candidate_t heap[], int min_score)
 {
     int heap_size = 0;
     candidate_t candidate;
@@ -314,7 +314,7 @@ static void ftx_normalize_logl(float* log174)
     }
 }
 
-bool ft8_decode(const waterfall_t* wf, const candidate_t* cand, message_t* message, int max_iterations, decode_status_t* status, uint8_t* plain)
+bool ft8lib_decode(const waterfall_t* wf, const candidate_t* cand, message_t* message, int max_iterations, decode_status_t* status, uint8_t* plain)
 {
     float log174[FTX_LDPC_N]; // message bits encoded as likelihood
     if (wf->protocol == PROTO_FT4)
@@ -329,8 +329,8 @@ bool ft8_decode(const waterfall_t* wf, const candidate_t* cand, message_t* messa
     ftx_normalize_logl(log174);
 
     uint8_t plain174[FTX_LDPC_N]; // message bits (0/1)
-    bp_decode(log174, max_iterations, plain174, &status->ldpc_errors);
-    // ldpc_decode(log174, max_iterations, plain174, &status->ldpc_errors);
+    ft8lib_bp_decode(log174, max_iterations, plain174, &status->ldpc_errors);
+    // ft8lib_ldpc_decode(log174, max_iterations, plain174, &status->ldpc_errors);
 
     if (status->ldpc_errors > 0)
     {
@@ -342,11 +342,11 @@ bool ft8_decode(const waterfall_t* wf, const candidate_t* cand, message_t* messa
     pack_bits(plain174, FTX_LDPC_K, a91);
 
     // Extract CRC and check it
-    status->crc_extracted = ftx_extract_crc(a91);
+    status->crc_extracted = ft8lib_extract_crc(a91);
     // [1]: 'The CRC is calculated on the source-encoded message, zero-extended from 77 to 82 bits.'
     a91[9] &= 0xF8;
     a91[10] &= 0x00;
-    status->crc_calculated = ftx_compute_crc(a91, 96 - 14);
+    status->crc_calculated = ft8lib_compute_crc(a91, 96 - 14);
 
     if (status->crc_extracted != status->crc_calculated)
     {
@@ -371,7 +371,7 @@ bool ft8_decode(const waterfall_t* wf, const candidate_t* cand, message_t* messa
         }
     }
 
-    status->unpack_status = unpack77(a91, message->text);
+    status->unpack_status = ft8lib_unpack77(a91, message->text);
 
     if (status->unpack_status < 0)
     {

@@ -377,7 +377,7 @@ void accumulate_waterfall(monitor_t* mon, const float* signal, int num_samples) 
 // Step 2: Candidate Search
 // ------------------------------------------------------------------------------------
 int find_candidates(const waterfall_t* wf, candidate_t* candidate_list, int candidate_size, int min_score) {
-    return ft8_find_sync(wf, candidate_size, candidate_list, min_score);
+    return ft8lib_find_sync(wf, candidate_size, candidate_list, min_score);
 }
 
 __attribute__((weak)) void ft8_on_message_decoded(const char* phase,
@@ -435,7 +435,7 @@ int decode_candidates(const waterfall_t* wf, const candidate_t* candidate_list, 
         message_t message = {0};
         decode_status_t status = {0};
         uint8_t plain174[FTX_LDPC_N];
-        if (!ft8_decode(wf, cand, &message, ldpc_iterations, &status, plain174)) {
+        if (!ft8lib_decode(wf, cand, &message, ldpc_iterations, &status, plain174)) {
             if (status.ldpc_errors > 0) {
                 // LOG(LOG_DEBUG, "LDPC decode: %d errors\n", status.ldpc_errors);
             } else if (status.crc_calculated != status.crc_extracted) {
@@ -756,7 +756,7 @@ int process_buffer_ori(float const *signal,int sample_rate, int num_samples, boo
   // Find top candidates by Costas sync score and localize them in time and frequency
   int const candidate_size = (mon_cfg.f_max * kMax_candidates) / 3000; // Scale by bandwidth relative to the original 3 kHz
   candidate_t candidate_list[candidate_size];
-  int num_candidates = ft8_find_sync(&mon.wf, candidate_size, candidate_list, kMin_score);
+  int num_candidates = ft8lib_find_sync(&mon.wf, candidate_size, candidate_list, kMin_score);
 
   // Hash table for decoded messages (to check for duplicates)
   int num_decoded = 0;
@@ -777,10 +777,10 @@ int process_buffer_ori(float const *signal,int sample_rate, int num_samples, boo
       float const freq_hz = (cand->freq_offset + (float)cand->freq_sub / mon.wf.freq_osr) / mon.symbol_period;
       float const time_sec = (cand->time_offset + (float)cand->time_sub / mon.wf.time_osr) * mon.symbol_period;
 
-      message_t message = {0}; // Written by ft8_decode()
+      message_t message = {0}; // Written by ft8lib_decode()
       decode_status_t status = {0}; // ditto
       uint8_t plain174[FTX_LDPC_N];
-      if (!ft8_decode(&mon.wf, cand, &message, kLDPC_iterations, &status, plain174)){
+      if (!ft8lib_decode(&mon.wf, cand, &message, kLDPC_iterations, &status, plain174)){
 	      // printf("000000 %3d %+4.2f %4.0f ~  ---\n", cand->score, time_sec, freq_hz);
         if (status.ldpc_errors > 0){
           LOG(LOG_DEBUG, "LDPC decode: %d errors\n", status.ldpc_errors);

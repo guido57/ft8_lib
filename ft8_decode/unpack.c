@@ -15,7 +15,7 @@
 
 // n28 is a 28-bit integer, e.g. n28a or n28b, containing all the
 // call sign bits from a packed message.
-int unpack_callsign(uint32_t n28, uint8_t ip, uint8_t i3, char* result)
+int ft8lib_unpack_callsign(uint32_t n28, uint8_t ip, uint8_t i3, char* result)
 {
     // Check for special tokens DE, QRZ, CQ, CQ_nnn, CQ_aaaa
     if (n28 < NTOKENS)
@@ -34,7 +34,7 @@ int unpack_callsign(uint32_t n28, uint8_t ip, uint8_t i3, char* result)
         {
             // CQ_nnn with 3 digits
             strcpy(result, "CQ ");
-            int_to_dd(result + 3, n28 - 3, 3, false);
+            ft8lib_int_to_dd(result + 3, n28 - 3, 3, false);
             return 0; // Success
         }
         if (n28 <= 532443L)
@@ -46,14 +46,14 @@ int unpack_callsign(uint32_t n28, uint8_t ip, uint8_t i3, char* result)
             aaaa[4] = '\0';
             for (int i = 3; /* */; --i)
             {
-                aaaa[i] = charn(n % 27, 4);
+                aaaa[i] = ft8lib_charn(n % 27, 4);
                 if (i == 0)
                     break;
                 n /= 27;
             }
 
             strcpy(result, "CQ ");
-            strcat(result, trim_front(aaaa));
+            strcat(result, ft8lib_trim_front(aaaa));
             return 0; // Success
         }
         // ? TODO: unspecified in the WSJT-X code
@@ -67,7 +67,7 @@ int unpack_callsign(uint32_t n28, uint8_t ip, uint8_t i3, char* result)
         // TODO: implement
         strcpy(result, "<...>");
         // result[0] = '<';
-        // int_to_dd(result + 1, n28, 7, false);
+        // ft8lib_int_to_dd(result + 1, n28, 7, false);
         // result[8] = '>';
         // result[9] = '\0';
         return 0;
@@ -78,20 +78,20 @@ int unpack_callsign(uint32_t n28, uint8_t ip, uint8_t i3, char* result)
 
     char callsign[7];
     callsign[6] = '\0';
-    callsign[5] = charn(n % 27, 4);
+    callsign[5] = ft8lib_charn(n % 27, 4);
     n /= 27;
-    callsign[4] = charn(n % 27, 4);
+    callsign[4] = ft8lib_charn(n % 27, 4);
     n /= 27;
-    callsign[3] = charn(n % 27, 4);
+    callsign[3] = ft8lib_charn(n % 27, 4);
     n /= 27;
-    callsign[2] = charn(n % 10, 3);
+    callsign[2] = ft8lib_charn(n % 10, 3);
     n /= 10;
-    callsign[1] = charn(n % 36, 2);
+    callsign[1] = ft8lib_charn(n % 36, 2);
     n /= 36;
-    callsign[0] = charn(n % 37, 1);
+    callsign[0] = ft8lib_charn(n % 37, 1);
 
     // Skip trailing and leading whitespace in case of a short callsign
-    strcpy(result, trim(callsign));
+    strcpy(result, ft8lib_trim(callsign));
     if (strlen(result) == 0)
         return -1;
 
@@ -111,7 +111,7 @@ int unpack_callsign(uint32_t n28, uint8_t ip, uint8_t i3, char* result)
     return 0; // Success
 }
 
-int unpack_type1(const uint8_t* a77, uint8_t i3, char* call_to, char* call_de, char* extra)
+int ft8lib_unpack_type1(const uint8_t* a77, uint8_t i3, char* call_to, char* call_de, char* extra)
 {
     uint32_t n28a, n28b;
     uint16_t igrid4;
@@ -133,15 +133,15 @@ int unpack_type1(const uint8_t* a77, uint8_t i3, char* call_to, char* call_de, c
     igrid4 |= (a77[9] >> 6);
 
     // Unpack both callsigns
-    if (unpack_callsign(n28a >> 1, n28a & 0x01, i3, call_to) < 0)
+    if (ft8lib_unpack_callsign(n28a >> 1, n28a & 0x01, i3, call_to) < 0)
     {
         return -1;
     }
-    if (unpack_callsign(n28b >> 1, n28b & 0x01, i3, call_de) < 0)
+    if (ft8lib_unpack_callsign(n28b >> 1, n28b & 0x01, i3, call_de) < 0)
     {
         return -2;
     }
-    // Fix "CQ_" to "CQ " -> already done in unpack_callsign()
+    // Fix "CQ_" to "CQ " -> already done in ft8lib_unpack_callsign()
 
     // TODO: add to recent calls
     // if (call_to[0] != '<' && strlen(call_to) >= 4) {
@@ -199,7 +199,7 @@ int unpack_type1(const uint8_t* a77, uint8_t i3, char* call_to, char* call_de, c
             {
                 *dst++ = 'R'; // Add "R" before report
             }
-            int_to_dd(dst, irpt - 35, 2, true);
+            ft8lib_int_to_dd(dst, irpt - 35, 2, true);
             break;
         }
         // if (irpt >= 2 && strncmp(call_to, "CQ", 2) == 0) return -1;
@@ -208,7 +208,7 @@ int unpack_type1(const uint8_t* a77, uint8_t i3, char* call_to, char* call_de, c
     return 0; // Success
 }
 
-int unpack_text(const uint8_t* a71, char* text)
+int ft8lib_unpack_text(const uint8_t* a71, char* text)
 {
     // TODO: test
     uint8_t b71[9];
@@ -233,14 +233,14 @@ int unpack_text(const uint8_t* a71, char* text)
             b71[i] = rem / 42;
             rem = rem % 42;
         }
-        c14[idx] = charn(rem, 0);
+        c14[idx] = ft8lib_charn(rem, 0);
     }
 
-    strcpy(text, trim(c14));
+    strcpy(text, ft8lib_trim(c14));
     return 0; // Success
 }
 
-int unpack_telemetry(const uint8_t* a71, char* telemetry)
+int ft8lib_unpack_telemetry(const uint8_t* a71, char* telemetry)
 {
     uint8_t b71[9];
 
@@ -269,7 +269,7 @@ int unpack_telemetry(const uint8_t* a71, char* telemetry)
 
 //none standard for wsjt-x 2.0
 //by KD8CEC
-int unpack_nonstandard(const uint8_t* a77, char* call_to, char* call_de, char* extra)
+int ft8lib_unpack_nonstandard(const uint8_t* a77, char* call_to, char* call_de, char* extra)
 {
     uint32_t n12, iflip, nrpt, icq;
     uint64_t n58;
@@ -295,7 +295,7 @@ int unpack_nonstandard(const uint8_t* a77, char* call_to, char* call_de, char* e
 
     for (int i = 10; /* no condition */; --i)
     {
-        c11[i] = charn(n58 % 38, 5);
+        c11[i] = ft8lib_charn(n58 % 38, 5);
         if (i == 0)
             break;
         n58 /= 38;
@@ -305,7 +305,7 @@ int unpack_nonstandard(const uint8_t* a77, char* call_to, char* call_de, char* e
     // should replace with hash12(n12, call_3);
     strcpy(call_3, "<...>");
     // call_3[0] = '<';
-    // int_to_dd(call_3 + 1, n12, 4, false);
+    // ft8lib_int_to_dd(call_3 + 1, n12, 4, false);
     // call_3[5] = '>';
     // call_3[6] = '\0';
 
@@ -315,7 +315,7 @@ int unpack_nonstandard(const uint8_t* a77, char* call_to, char* call_de, char* e
 
     if (icq == 0)
     {
-        strcpy(call_to, trim(call_1));
+        strcpy(call_to, ft8lib_trim(call_1));
         if (nrpt == 1)
             strcpy(extra, "RRR");
         else if (nrpt == 2)
@@ -332,12 +332,12 @@ int unpack_nonstandard(const uint8_t* a77, char* call_to, char* call_de, char* e
         strcpy(call_to, "CQ");
         extra[0] = '\0';
     }
-    strcpy(call_de, trim(call_2));
+    strcpy(call_de, ft8lib_trim(call_2));
 
     return 0;
 }
 
-int unpack77_fields(const uint8_t* a77, char* call_to, char* call_de, char* extra)
+int ft8lib_unpack77_fields(const uint8_t* a77, char* call_to, char* call_de, char* extra)
 {
     call_to[0] = call_de[0] = extra[0] = '\0';
 
@@ -352,7 +352,7 @@ int unpack77_fields(const uint8_t* a77, char* call_to, char* call_de, char* extr
         if (n3 == 0)
         {
             // 0.0  Free text
-            return unpack_text(a77, extra);
+            return ft8lib_unpack_text(a77, extra);
         }
         // else if (i3 == 0 && n3 == 1) {
         //     // 0.1  K1ABC RR73; W9XYZ <KH1/KH7Z> -11   28 28 10 5       71   DXpedition Mode
@@ -367,13 +367,13 @@ int unpack77_fields(const uint8_t* a77, char* call_to, char* call_de, char* extr
         else if (n3 == 5)
         {
             // 0.5   0123456789abcdef01                 71               71   Telemetry (18 hex)
-            return unpack_telemetry(a77, extra);
+            return ft8lib_unpack_telemetry(a77, extra);
         }
     }
     else if (i3 == 1 || i3 == 2)
     {
         // Type 1 (standard message) or Type 2 ("/P" form for EU VHF contest)
-        return unpack_type1(a77, i3, call_to, call_de, extra);
+        return ft8lib_unpack_type1(a77, i3, call_to, call_de, extra);
     }
     // else if (i3 == 3) {
     //     // Type 3: ARRL RTTY Contest
@@ -383,7 +383,7 @@ int unpack77_fields(const uint8_t* a77, char* call_to, char* call_de, char* extr
         //     // Type 4: Nonstandard calls, e.g. <WA9XYZ> PJ4/KA1ABC RR73
         //     // One hashed call or "CQ"; one compound or nonstandard call with up
         //     // to 11 characters; and (if not "CQ") an optional RRR, RR73, or 73.
-        return unpack_nonstandard(a77, call_to, call_de, extra);
+        return ft8lib_unpack_nonstandard(a77, call_to, call_de, extra);
     }
     // else if (i3 == 5) {
     //     // Type 5: TU; W9XYZ K1ABC R-09 FN             1 28 28 1 7 9       74   WWROF contest
@@ -393,13 +393,13 @@ int unpack77_fields(const uint8_t* a77, char* call_to, char* call_de, char* extr
     return -1;
 }
 
-int unpack77(const uint8_t* a77, char* message)
+int ft8lib_unpack77(const uint8_t* a77, char* message)
 {
     char call_to[14];
     char call_de[14];
     char extra[19];
 
-    int rc = unpack77_fields(a77, call_to, call_de, extra);
+    int rc = ft8lib_unpack77_fields(a77, call_to, call_de, extra);
     if (rc < 0)
         return rc;
 

@@ -62,13 +62,13 @@ static void encode174(const uint8_t* message, uint8_t* codeword)
     }
 }
 
-void ft8_encode(const uint8_t* payload, uint8_t* tones)
+void ft8lib_encode(const uint8_t* payload, uint8_t* tones)
 {
     uint8_t a91[FTX_LDPC_K_BYTES]; // Store 77 bits of payload + 14 bits CRC
 
     // Compute and add CRC at the end of the message
     // a91 contains 77 bits of payload + 14 bits of CRC
-    ftx_add_crc(payload, a91);
+    ft8lib_add_crc(payload, a91);
 
     uint8_t codeword[FTX_LDPC_N_BYTES];
     encode174(a91, codeword);
@@ -124,7 +124,7 @@ void ft8_encode(const uint8_t* payload, uint8_t* tones)
     }
 }
 
-void ft4_encode(const uint8_t* payload, uint8_t* tones)
+void ft8lib_ft4_encode(const uint8_t* payload, uint8_t* tones)
 {
     uint8_t a91[FTX_LDPC_K_BYTES]; // Store 77 bits of payload + 14 bits CRC
     uint8_t payload_xor[10];       // Encoded payload data
@@ -138,7 +138,7 @@ void ft4_encode(const uint8_t* payload, uint8_t* tones)
 
     // Compute and add CRC at the end of the message
     // a91 contains 77 bits of payload + 14 bits of CRC
-    ftx_add_crc(payload_xor, a91);
+    ft8lib_add_crc(payload_xor, a91);
 
     uint8_t codeword[FTX_LDPC_N_BYTES];
     encode174(a91, codeword); // 91 bits -> 174 bits

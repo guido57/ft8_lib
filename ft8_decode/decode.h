@@ -11,7 +11,7 @@ extern "C"
 {
 #endif
 
-    /// Input structure to ft8_find_sync() function. This structure describes stored waterfall data over the whole message slot.
+    /// Input structure to ft8lib_find_sync() function. This structure describes stored waterfall data over the whole message slot.
     /// Fields time_osr and freq_osr specify additional oversampling rate for time and frequency resolution.
     /// If time_osr=1, FFT magnitude data is collected once for every symbol transmitted, i.e. every 1/6.25 = 0.16 seconds.
     /// Values time_osr > 1 mean each symbol is further subdivided in time.
@@ -29,7 +29,7 @@ extern "C"
         ftx_protocol_t protocol; ///< Indicate if using FT4 or FT8
     } waterfall_t;
 
-    /// Output structure of ft8_find_sync() and input structure of ft8_decode().
+    /// Output structure of ft8lib_find_sync() and input structure of ft8lib_decode().
     /// Holds the position of potential start of a message in time and frequency.
     typedef struct
     {
@@ -71,7 +71,7 @@ extern "C"
     /// @param[in,out] heap Array of candidate_t type entries (with num_candidates allocated entries)
     /// @param[in] min_score Minimal score allowed for pruning unlikely candidates (can be zero for no effect)
     /// @return Number of candidates filled in the heap
-    int ft8_find_sync(const waterfall_t* power, int num_candidates, candidate_t heap[], int min_score);
+    int ft8lib_find_sync(const waterfall_t* power, int num_candidates, candidate_t heap[], int min_score);
 
     /// Attempt to decode a message candidate. Extracts the bit probabilities, runs LDPC decoder, checks CRC and unpacks the message in plain text.
     /// @param[in] power Waterfall data collected during message slot
@@ -81,7 +81,7 @@ extern "C"
     /// @param[out] status decode_status_t structure that will be filled with the status of various decoding steps
     /// @param[out] plain Optional pointer to receive the decoded 174-bit codeword (0/1 bytes)
     /// @return True if the decoding was successful, false otherwise (check status for details)
-    bool ft8_decode(const waterfall_t* power, const candidate_t* cand, message_t* message, int max_iterations, decode_status_t* status, uint8_t* plain);
+    bool ft8lib_decode(const waterfall_t* power, const candidate_t* cand, message_t* message, int max_iterations, decode_status_t* status, uint8_t* plain);
 
 #ifdef __cplusplus
 }

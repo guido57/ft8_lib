@@ -19,17 +19,17 @@ const char A4[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 // Pack a special token, a 22-bit hash code, or a valid base call
 // into a 28-bit integer.
-int32_t pack28(const char* callsign)
+int32_t ft8lib_pack28(const char* callsign)
 {
     // Check for special tokens first
-    if (starts_with(callsign, "DE "))
+    if (ft8lib_starts_with(callsign, "DE "))
         return 0;
-    if (starts_with(callsign, "QRZ "))
+    if (ft8lib_starts_with(callsign, "QRZ "))
         return 1;
-    if (starts_with(callsign, "CQ "))
+    if (ft8lib_starts_with(callsign, "CQ "))
         return 2;
 
-    if (starts_with(callsign, "CQ_"))
+    if (ft8lib_starts_with(callsign, "CQ_"))
     {
         int nnum = 0, nlet = 0;
 
@@ -47,13 +47,13 @@ int32_t pack28(const char* callsign)
     }
 
     // Copy callsign to 6 character buffer
-    if (starts_with(callsign, "3DA0") && length <= 7)
+    if (ft8lib_starts_with(callsign, "3DA0") && length <= 7)
     {
         // Work-around for Swaziland prefix: 3DA0XYZ -> 3D0XYZ
         memcpy(c6, "3D0", 3);
         memcpy(c6 + 3, callsign + 4, length - 4);
     }
-    else if (starts_with(callsign, "3X") && is_letter(callsign[2]) && length <= 7)
+    else if (ft8lib_starts_with(callsign, "3X") && ft8lib_is_letter(callsign[2]) && length <= 7)
     {
         // Work-around for Guinea prefixes: 3XA0XYZ -> QA0XYZ
         memcpy(c6, "Q", 1);
@@ -61,12 +61,12 @@ int32_t pack28(const char* callsign)
     }
     else
     {
-        if (is_digit(callsign[2]) && length <= 6)
+        if (ft8lib_is_digit(callsign[2]) && length <= 6)
         {
             // AB0XYZ
             memcpy(c6, callsign, length);
         }
-        else if (is_digit(callsign[1]) && length <= 5)
+        else if (ft8lib_is_digit(callsign[1]) && length <= 5)
         {
             // A0XYZ -> " A0XYZ"
             memcpy(c6 + 1, callsign, length);
@@ -75,7 +75,7 @@ int32_t pack28(const char* callsign)
 
     // Check for standard callsign
     int i0, i1, i2, i3, i4, i5;
-    if ((i0 = char_index(A1, c6[0])) >= 0 && (i1 = char_index(A2, c6[1])) >= 0 && (i2 = char_index(A3, c6[2])) >= 0 && (i3 = char_index(A4, c6[3])) >= 0 && (i4 = char_index(A4, c6[4])) >= 0 && (i5 = char_index(A4, c6[5])) >= 0)
+    if ((i0 = ft8lib_char_index(A1, c6[0])) >= 0 && (i1 = ft8lib_char_index(A2, c6[1])) >= 0 && (i2 = ft8lib_char_index(A3, c6[2])) >= 0 && (i3 = ft8lib_char_index(A4, c6[3])) >= 0 && (i4 = ft8lib_char_index(A4, c6[4])) >= 0 && (i5 = ft8lib_char_index(A4, c6[5])) >= 0)
     {
         // This is a standard callsign
         int32_t n28 = i0;
@@ -98,7 +98,7 @@ int32_t pack28(const char* callsign)
 // Check if a string could be a valid standard callsign or a valid
 // compound callsign.
 // Return base call "bc" and a logical "cok" indicator.
-bool chkcall(const char* call, char* bc)
+bool ft8lib_chkcall(const char* call, char* bc)
 {
     int length = strlen(call); // n1=len_trim(w)
     if (length > 11)
@@ -119,7 +119,7 @@ bool chkcall(const char* call, char* bc)
     return true;
 }
 
-uint16_t packgrid(const char* grid4)
+uint16_t ft8lib_packgrid(const char* grid4)
 {
     if (grid4 == 0)
     {
@@ -128,15 +128,15 @@ uint16_t packgrid(const char* grid4)
     }
 
     // Take care of special cases
-    if (equals(grid4, "RRR"))
+    if (ft8lib_equals(grid4, "RRR"))
         return MAXGRID4 + 2;
-    if (equals(grid4, "RR73"))
+    if (ft8lib_equals(grid4, "RR73"))
         return MAXGRID4 + 3;
-    if (equals(grid4, "73"))
+    if (ft8lib_equals(grid4, "73"))
         return MAXGRID4 + 4;
 
     // Check for standard 4 letter grid
-    if (in_range(grid4[0], 'A', 'R') && in_range(grid4[1], 'A', 'R') && is_digit(grid4[2]) && is_digit(grid4[3]))
+    if (ft8lib_in_range(grid4[0], 'A', 'R') && ft8lib_in_range(grid4[1], 'A', 'R') && ft8lib_is_digit(grid4[2]) && ft8lib_is_digit(grid4[3]))
     {
         uint16_t igrid4 = (grid4[0] - 'A');
         igrid4 = igrid4 * 18 + (grid4[1] - 'A');
@@ -149,13 +149,13 @@ uint16_t packgrid(const char* grid4)
     // TODO: check the range of dd
     if (grid4[0] == 'R')
     {
-        int dd = dd_to_int(grid4 + 1, 3);
+        int dd = ft8lib_dd_to_int(grid4 + 1, 3);
         uint16_t irpt = 35 + dd;
         return (MAXGRID4 + irpt) | 0x8000; // ir = 1
     }
     else
     {
-        int dd = dd_to_int(grid4, 3);
+        int dd = ft8lib_dd_to_int(grid4, 3);
         uint16_t irpt = 35 + dd;
         return (MAXGRID4 + irpt); // ir = 0
     }
@@ -164,7 +164,7 @@ uint16_t packgrid(const char* grid4)
 }
 
 // Pack Type 1 (Standard 77-bit message) and Type 2 (ditto, with a "/P" call)
-int pack77_1(const char* msg, uint8_t* b77)
+int ft8lib_pack77_1(const char* msg, uint8_t* b77)
 {
     // Locate the first delimiter
     const char* s1 = strchr(msg, ' ');
@@ -174,8 +174,8 @@ int pack77_1(const char* msg, uint8_t* b77)
     const char* call1 = msg; // 1st call
     const char* call2 = s1 + 1; // 2nd call
 
-    int32_t n28a = pack28(call1);
-    int32_t n28b = pack28(call2);
+    int32_t n28a = ft8lib_pack28(call1);
+    int32_t n28b = ft8lib_pack28(call2);
 
     if (n28a < 0 || n28b < 0)
         return -1;
@@ -186,12 +186,12 @@ int pack77_1(const char* msg, uint8_t* b77)
     const char* s2 = strchr(s1 + 1, ' ');
     if (s2 != 0)
     {
-        igrid4 = packgrid(s2 + 1);
+        igrid4 = ft8lib_packgrid(s2 + 1);
     }
     else
     {
         // Two callsigns, no grid/report
-        igrid4 = packgrid(0);
+        igrid4 = ft8lib_packgrid(0);
     }
 
     uint8_t i3 = 1; // No suffix or /R
@@ -217,7 +217,7 @@ int pack77_1(const char* msg, uint8_t* b77)
     return 0;
 }
 
-void packtext77(const char* text, uint8_t* b77)
+void ft8lib_packtext77(const char* text, uint8_t* b77)
 {
     int length = strlen(text);
 
@@ -254,7 +254,7 @@ void packtext77(const char* text, uint8_t* b77)
         // Get the index of the current char
         if (j < length)
         {
-            int q = char_index(A0, text[j]);
+            int q = ft8lib_char_index(A0, text[j]);
             x = (q > 0) ? q : 0;
         }
         else
@@ -281,10 +281,10 @@ void packtext77(const char* text, uint8_t* b77)
     b77[9] &= 0x00;
 }
 
-int pack77(const char* msg, uint8_t* c77)
+int ft8lib_pack77(const char* msg, uint8_t* c77)
 {
     // Check Type 1 (Standard 77-bit message) or Type 2, with optional "/P"
-    if (0 == pack77_1(msg, c77))
+    if (0 == ft8lib_pack77_1(msg, c77))
     {
         return 0;
     }
@@ -296,7 +296,7 @@ int pack77(const char* msg, uint8_t* c77)
 
     // Default to free text
     // i3=0 n3=0
-    packtext77(msg, c77);
+    ft8lib_packtext77(msg, c77);
     return 0;
 }
 
@@ -322,8 +322,8 @@ bool test1()
 
     for (int i = 0; inputs[i]; ++i)
     {
-        int32_t result = ft8_v2::pack28(inputs[i]);
-        printf("pack28(\"%s\") = %d\n", inputs[i], result);
+        int32_t result = ft8_v2::ft8lib_pack28(inputs[i]);
+        printf("ft8lib_pack28(\"%s\") = %d\n", inputs[i], result);
     }
 
     return true;
@@ -344,8 +344,8 @@ bool test2()
     for (int i = 0; inputs[i]; ++i)
     {
         uint8_t result[10];
-        int rc = ft8_v2::pack77_1(inputs[i], result);
-        printf("pack77_1(\"%s\") = %d\t[", inputs[i], rc);
+        int rc = ft8_v2::ft8lib_pack77_1(inputs[i], result);
+        printf("ft8lib_pack77_1(\"%s\") = %d\t[", inputs[i], rc);
         for (int j = 0; j < 10; ++j)
         {
             printf("%02x ", result[j]);
